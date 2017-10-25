@@ -27,6 +27,7 @@
 
 #endif
 
+#include "../DataDeduplication/headerFiles/SHAHashing.h"
 
 /**
  * de-duplication variables
@@ -38,7 +39,7 @@
 /**
  * HashTable size
  */
-#define HASHSIZE 1000
+#define HASHSIZE 100
 
 /**
  * AE window size
@@ -86,7 +87,7 @@ static unsigned hash(char *s);
 static struct nlist *lookup(char *s);
 static struct nlist *insertData(char *name, char *defn);
 static void undef(char *s);
-int chunkData(unsigned char *buffer, int n);
+int chunkData(unsigned char *buffer, int n,Array transferArray);
 int comp(unsigned char *i,unsigned char *max);
 
 /**
@@ -210,9 +211,7 @@ void* readerThread(void)
 
                 //enqueue the order Record
                 enqueue_order(orderQueue, tempOrderRecord);
-
             }
-
             fprintf(logfile,"sessionId : %d\n",sessionId);
             print_tcp_packet(buffer, data_size, logfile);
             printf("Packet is TCP\n");
@@ -221,7 +220,9 @@ void* readerThread(void)
     }
 
     Array dataArray;
+    Array transferArray;
     initArray(&dataArray, 8);
+    initArray(&transferArray,8);
 
     for(int limit =0;limit<orderQueue->size;limit++){
 
@@ -247,10 +248,10 @@ void* readerThread(void)
             id = id/10;
         }
 
-        for(int k=0;k<4;k++){
+        for(int k = 0; k < 4; k++){
             insertArray(&dataArray,idArray[k]);
         }
-        for(int k=0;k<4;k++){
+        for(int k = 0; k < 4; k++){
             insertArray(&dataArray,lenArray[k]);
         }
 
@@ -261,6 +262,70 @@ void* readerThread(void)
         }
     }
 
+    //Initialize SHA contexts
+    SHA1_CTX ctx;
+    BYTE buf[SHA1_BLOCK_SIZE];
+    int dedupRecords[100] ={0};
+
+    while(1){
+
+        int length = strlen(dataArray.array);
+
+        //if data length is not enough
+        if(length < (windowSize + 8)){
+
+            //calculate hash
+            sha1Init(&ctx);
+            sha1Update(&ctx,dataArray.array,length);
+            sha1Final(&ctx, buf);
+
+            //check whether the hash exist
+            if (lookup(buf) == NULL) {
+                (void) insertData(buf, dataArray.array);
+                break;
+            }else{
+                int j = 0;
+                while(buf[j] != '\0'){
+                    insertArray(&transferArray,buf[j]);
+                    j++;
+                }
+            }
+        }
+
+        //if length is more than window size
+        int boundary = chunkData(dataArray.array, length,transferArray);
+
+        //get the strings to hash which have more than 20 characters
+        if(boundary >20) {
+            //calculate hash
+            sha1Init(&ctx);
+            sha1Update(&ctx, &dataArray, boundary + 1);
+            sha1Final(&ctx, buf);
+
+            //store hash values
+            char subsStr[boundary + 1];
+            for (int j = 0; j < boundary + 1; j++) {
+                subsStr[j] = dataArray.array[j];
+            }
+
+            //check whether the hash exist
+            if (lookup(buf) == NULL) {
+                (void) insertData(buf, subsStr);
+            } else {
+
+            }
+        }
+
+        //break condition
+        if(boundary == length){
+            break;
+        }
+
+        //increment string pointer
+        dataArray.array = dataArray.array + boundary + 1;
+    }
+
+    //free data array
     freeArray(&dataArray);
 
     /*print data in different session data queues*/
@@ -285,9 +350,6 @@ void* dedupThread(void)
     //printf("Inside the deduplication Thread");
     pthread_exit(0);
 }
-
-
-
 
 /*..............................function definitions............................................*/
 int isTcp(unsigned char* buffer, int size)
@@ -513,13 +575,13 @@ static struct nlist *lookup(char *s) {
 }
 
 /*
- * Put a value into the hash table
+ * insert a value into the hash table
  */
 static struct nlist *insertData(char *name, char *defn) {
 
     struct nlist *np;
 
-    if ((np = lookup(name)) == NULL) {
+
 
         unsigned hashval;
 
@@ -532,11 +594,10 @@ static struct nlist *insertData(char *name, char *defn) {
         np->next = hashtab[hashval];
         hashtab[hashval] = np;
 
-    } else
-
+    /*} else
         free((void *)np->defn);
 
-    np->defn = mystrdup(defn);
+    np->defn = mystrdup(defn);*/
 
     return np;
 }
@@ -574,7 +635,7 @@ static void undef(char *s) {
 /**
  * this method chunks the given data stream
  */
-int chunkData(unsigned char *buffer, int n) {
+int chunkData(unsigned char *buffer, int n, Array transferArray) {
 
     unsigned char *copy;
     unsigned char *max = buffer, *end = buffer + n - 8;
