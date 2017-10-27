@@ -31,6 +31,7 @@ CMakeFiles/TCPAccelerator.dir/lib/writeInLogger.c.o
 CMakeFiles/TCPAccelerator.dir/main.c.o
  /root/CLionProjects/DataDeduplication/headerFiles/LanDataQueue.h
  /root/CLionProjects/DataDeduplication/headerFiles/LanOrderQueue.h
+ /root/CLionProjects/DataDeduplication/headerFiles/SHAHashing.h
  /root/CLionProjects/DataDeduplication/headerFiles/constants.h
  /root/CLionProjects/DataDeduplication/headerFiles/deletedIdBST.h
  /root/CLionProjects/DataDeduplication/headerFiles/deletedIdMinHeap.h

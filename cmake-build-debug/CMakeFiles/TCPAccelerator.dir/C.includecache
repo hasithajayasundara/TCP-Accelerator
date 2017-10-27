@@ -22,6 +22,10 @@ types.h
 constants.h
 /root/CLionProjects/DataDeduplication/headerFiles/constants.h
 
+/root/CLionProjects/DataDeduplication/headerFiles/SHAHashing.h
+stddef.h
+-
+
 /root/CLionProjects/DataDeduplication/headerFiles/constants.h
 
 /root/CLionProjects/DataDeduplication/headerFiles/deletedIdBST.h
@@ -213,4 +217,6 @@ types.h
 /root/CLionProjects/DataDeduplication/headerFiles/LanOrderQueue.h
 headerFiles/deletedIdMinHeap.h
 /root/CLionProjects/TCPAccelerator/headerFiles/deletedIdMinHeap.h
+../DataDeduplication/headerFiles/SHAHashing.h
+/root/CLionProjects/DataDeduplication/headerFiles/SHAHashing.h
 

@@ -55,10 +55,3 @@ typedef struct dataQueue{
     int front, rear, capacity, size;
     struct dataRecord** dataRecordArray;
 } DATA_QUEUE;
-
-//dynamically growing array
-typedef struct {
-    char *array;
-    size_t used;
-    size_t size;
-} Array;
