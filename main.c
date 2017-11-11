@@ -24,7 +24,6 @@
 #ifndef LandataQueueIncluded
 
 #include "../DataDeduplication/headerFiles/LanDataQueue.h"
-
 #endif
 
 #ifndef LanorderQueueIncluded
@@ -35,6 +34,7 @@
 #endif
 
 #include "../DataDeduplication/headerFiles/SHAHashing.h"
+#include "headerFiles/writeInLogger.h"
 
 /**
  * de-duplication variables
@@ -146,11 +146,11 @@ int firstRoundUpdate = -1, minimumId, freeSessionId;
 struct deletedIdNode *root;
 ORDER_QUEUE *orderQueue;
 
-
 /*create session buffer*/
 struct session sessionBuf[MAX_SESSIONS];
 
 int main() {
+
     MIN_HEAP min_heap;
     initMinHeap(&min_heap);
     insertId(&min_heap, 10);
@@ -179,7 +179,6 @@ int main() {
     return 0;
 }
 
-
 /**
  * Reader Thread
  */
@@ -203,6 +202,11 @@ void *readerThread(void) {
     orderQueueLogfile = fopen("orderQueueLogfile.txt", "w");
     testLogfile = fopen("testLogfile.txt", "w");
     testLogfile1 = fopen("testLogfile1.txt", "w");
+
+    //Server configuration
+    /*Configuration for sending data to other accelerator node*/
+    char* ip="10.8.145.196";
+    int sock=getSocket(ip);
 
     if (logfile == NULL) { printf("Unable to create log.txt file."); }
 
@@ -265,8 +269,10 @@ void *readerThread(void) {
 
         DATA_QUEUE *dQueue = sessionBuf[sessID].queue;
 
-        u_int16_t len = dQueue->dataRecordArray[loc]->size;
         u_int32_t id = dQueue->dataRecordArray[loc]->sessionId;
+        unsigned char *dataLoad = dQueue->dataRecordArray[loc]->tcpPayload;
+        u_int16_t len = strlen(dataLoad);
+
 
         int position = 3;
         char lenArray[4] = {'0', '0', '0', '0'};
@@ -289,7 +295,6 @@ void *readerThread(void) {
             insertArray(&dataArray, lenArray[k]);
         }
 
-        unsigned char *dataLoad = dQueue->dataRecordArray[loc]->tcpPayload;
 
         while (*dataLoad != '\0') {
             char character = *(dataLoad);
@@ -313,7 +318,6 @@ void *readerThread(void) {
 
         //if data length is not enough
         if (length < (windowSize + 8)) {
-
             //calculate hash
             sha1Init(&ctx);
             sha1Update(&ctx, dataArray.array, length);
@@ -321,6 +325,7 @@ void *readerThread(void) {
 
             //check whether the hash exist
             if (lookup(buf) == NULL) {
+                amount++;
                 (void) insertData(buf, dataArray.array);
                 while (*(dataArray.array) != '\0') {
                     insertArray(&(data.dataLoad), *(dataArray.array));
@@ -354,6 +359,7 @@ void *readerThread(void) {
 
         //check whether the hash exist
         if (lookup(buf) == NULL) {
+            amount++;
             (void) insertData(buf, subsStr);
             for (int k = 0; k < boundary + 1; k++) {
                 insertArray(&(data.dataLoad), subsStr[k]);
@@ -368,7 +374,6 @@ void *readerThread(void) {
             }
         }
 
-
         //break condition
         if (boundary == length) {
             break;
@@ -378,6 +383,9 @@ void *readerThread(void) {
         dataArray.array = dataArray.array + boundary + 1;
         dataBoundaries += boundary + 1;
     }
+
+    /*send data to other accelerator node*/
+    sendTo_ACNode(data.dataLoad.array,sock);
 
     data.dedupSize = amount;
 
@@ -654,23 +662,18 @@ static struct nlist *lookup(char *s) {
 static struct nlist *insertData(char *name, char *defn) {
 
     struct nlist *np;
-
-
     unsigned hashval;
 
     if ((np = (struct nlist *) malloc(sizeof(*np))) == NULL) {
         printf("Error: ran out of memory");
         exit(EXIT_FAILURE);
     }
+
     hashval = hash(name);
     np->name = mystrdup(name);
     np->next = hashtab[hashval];
     hashtab[hashval] = np;
-
-    /*} else
-        free((void *)np->defn);
-
-    np->defn = mystrdup(defn);*/
+    np->defn = mystrdup(defn);
 
     return np;
 }

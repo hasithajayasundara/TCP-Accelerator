@@ -22,3 +22,8 @@ void print_ethernet_header(unsigned char* Buffer, int Size,FILE *logfile);
 
 
 void PrintData (unsigned char* data , int Size,FILE *logfile);
+
+//Send data to the end point
+int getSocket(char* ip);
+void sendTo_ACNode(char *data,int sock);
+void receiveFrom_ACNode(int sock,char* buffer);
