@@ -24,6 +24,7 @@
 #ifndef LandataQueueIncluded
 
 #include "../DataDeduplication/headerFiles/LanDataQueue.h"
+
 #endif
 
 #ifndef LanorderQueueIncluded
@@ -86,11 +87,14 @@ typedef struct {
     size_t size;
 } IntArray;
 
-//transfer data structure
-typedef struct transferData {
+/**
+ * Transfer this structure from one end to the other end
+ */
+typedef struct {
+    u_int16_t dataSize;
     u_int16_t dedupSize;
-    IntArray dedupPositions;
-    Array dataLoad;
+    u_int16_t *dedupPositions;
+    char *dataLoad;
 } TransferData;
 
 /**
@@ -130,12 +134,21 @@ int chunkData(unsigned char *buffer, int n);
 
 int comp(unsigned char *i, unsigned char *max);
 
-/**
- * Reader and de-duplication Thread
- */
+char *convert(TransferData transferData);
+
 void *readerThread(void);
 
 void *dedupThread(void);
+
+unsigned char *serialize_int(unsigned char *buffer, u_int16_t value);
+
+unsigned char *serialize_char(unsigned char *buffer, char value);
+
+unsigned char *serialize_struct(unsigned char *msg,TransferData data);
+
+int deserialize_int(unsigned char *buffer);
+
+char deserialize_char(unsigned char *buffer);
 
 /**
  * Variable definitions
@@ -205,8 +218,8 @@ void *readerThread(void) {
 
     //Server configuration
     /*Configuration for sending data to other accelerator node*/
-    char* ip="10.8.145.196";
-    int sock=getSocket(ip);
+    char *ip = "10.8.145.196";
+    int sock = getSocket(ip);
 
     if (logfile == NULL) { printf("Unable to create log.txt file."); }
 
@@ -259,7 +272,6 @@ void *readerThread(void) {
     }
 
     Array dataArray;
-    Array transferArray;
     initArray(&dataArray, STORAGE_CONST);
 
     for (int limit = 0; limit < orderQueue->size; limit++) {
@@ -272,7 +284,6 @@ void *readerThread(void) {
         u_int32_t id = dQueue->dataRecordArray[loc]->sessionId;
         unsigned char *dataLoad = dQueue->dataRecordArray[loc]->tcpPayload;
         u_int16_t len = strlen(dataLoad);
-
 
         int position = 3;
         char lenArray[4] = {'0', '0', '0', '0'};
@@ -295,11 +306,8 @@ void *readerThread(void) {
             insertArray(&dataArray, lenArray[k]);
         }
 
-
         while (*dataLoad != '\0') {
-            char character = *(dataLoad);
-            insertArray(&dataArray, character);
-            dataLoad += 1;
+            insertArray(&dataArray, *(dataLoad++));
         }
     }
 
@@ -307,10 +315,11 @@ void *readerThread(void) {
     SHA1_CTX ctx;
     BYTE buf[SHA1_BLOCK_SIZE];
     TransferData data;
-    int amount = 0;
-    int dataBoundaries = 0;
-    initArray(&(data.dataLoad), STORAGE_CONST);
-    initIntArray(&(data.dedupPositions), STORAGE_CONST);
+    int dataBoundaries = 0, transferDataLength = 0;
+    Array cArray;
+    IntArray intArray;
+    initArray(&cArray, STORAGE_CONST);
+    initArray(&intArray, STORAGE_CONST);
 
     while (1) {
 
@@ -325,18 +334,20 @@ void *readerThread(void) {
 
             //check whether the hash exist
             if (lookup(buf) == NULL) {
-                amount++;
                 (void) insertData(buf, dataArray.array);
                 while (*(dataArray.array) != '\0') {
-                    insertArray(&(data.dataLoad), *(dataArray.array));
+                    insertArray(&cArray, *(dataArray.array));
                     dataArray.array += 1;
                 }
             } else {
                 int j = 0;
-                amount++;
-                insertIntArray(&(data.dedupPositions), 0);
-                while (buf[j] != '\0') {
-                    insertArray(&(data.dataLoad), buf[j]);
+                insertIntArray(&intArray, 0);
+                while (j != 20) {
+                    if (buf[j] != '\0') {
+                        insertArray(&cArray, buf[j]);
+                    } else {
+                        insertArray(&cArray, '*');
+                    }
                     j++;
                 }
             }
@@ -359,17 +370,19 @@ void *readerThread(void) {
 
         //check whether the hash exist
         if (lookup(buf) == NULL) {
-            amount++;
             (void) insertData(buf, subsStr);
             for (int k = 0; k < boundary + 1; k++) {
-                insertArray(&(data.dataLoad), subsStr[k]);
+                insertArray(&cArray, subsStr[k]);
             }
         } else {
             int j = 0;
-            amount++;
-            insertIntArray(&(data.dedupPositions), dataBoundaries);
-            while (buf[j] != '\0') {
-                insertArray(&(data.dataLoad), buf[j]);
+            insertIntArray(&intArray, dataBoundaries);
+            while (j != 20) {
+                if (buf[j] != '\0') {
+                    insertArray(&cArray, buf[j]);
+                } else {
+                    insertArray(&cArray, '*');
+                }
                 j++;
             }
         }
@@ -384,10 +397,38 @@ void *readerThread(void) {
         dataBoundaries += boundary + 1;
     }
 
-    /*send data to other accelerator node*/
-    sendTo_ACNode(data.dataLoad.array,sock);
+    //setting up struct values
+    data.dataSize = cArray.used;
+    data.dedupSize = intArray.used;
 
-    data.dedupSize = amount;
+    if(cArray.used !=0) {
+        data.dataLoad = (char *) malloc(cArray.used);
+        for (int i = 0; i < cArray.used; i++) {
+            *(data.dataLoad + i) = *(cArray.array + i);
+        }
+    }else{
+        data.dataLoad = NULL;
+    }
+    if (intArray.used != 0) {
+        data.dedupPositions = (u_int16_t *) malloc(sizeof(u_int16_t) * intArray.used);
+        for (int i = 0; i < intArray.used; i++) {
+            *(data.dedupPositions + i) = *(intArray.array + i);
+        }
+    }else{
+        data.dedupPositions = NULL;
+    }
+
+    //serialize the data structure
+    unsigned char *networkBuffer = (unsigned char *) malloc(cArray.used + (intArray.used + 1) * 4);
+    unsigned char *dupBuffer = networkBuffer;
+
+    //serialize the structure
+    serialize_struct(networkBuffer,data);
+
+    /*send data to other accelerator node*/
+    sendTo_ACNode(dupBuffer, sock);
+
+    int a = deserialize_int(dupBuffer);
 
     //free data array
     freeArray(&dataArray);
@@ -617,9 +658,7 @@ void freeIntArray(IntArray *a) {
  * make a duplicate copy of s
  */
 static char *mystrdup(char *s) {
-
     char *p = (char *) malloc(strlen(s) + 1);
-
     if (p == NULL) {
         printf("Error: ran out of memory");
         exit(EXIT_FAILURE);
@@ -633,9 +672,7 @@ static char *mystrdup(char *s) {
  * Calculates a hash value for a given string
  */
 static unsigned hash(char *s) {
-
     unsigned hashval;
-
     for (hashval = 0; *s != '\0'; s++)
         hashval = *s + 31 * hashval;
 
@@ -646,9 +683,7 @@ static unsigned hash(char *s) {
  * Look for s in the hash table
  */
 static struct nlist *lookup(char *s) {
-
     struct nlist *np;
-
     for (np = hashtab[hash(s)]; np != NULL; np = np->next)
         if (strcmp(s, np->name) == 0)
             return np;  // Found
@@ -660,7 +695,6 @@ static struct nlist *lookup(char *s) {
  * insert a value into the hash table
  */
 static struct nlist *insertData(char *name, char *defn) {
-
     struct nlist *np;
     unsigned hashval;
 
@@ -682,7 +716,6 @@ static struct nlist *insertData(char *name, char *defn) {
  * remove a name and definition from the table
  */
 static void undef(char *s) {
-
     unsigned h;
     struct nlist *prior;
     struct nlist *np;
@@ -712,7 +745,6 @@ static void undef(char *s) {
  * this method chunks the given data stream
  */
 int chunkData(unsigned char *buffer, int n) {
-
     unsigned char *copy;
     unsigned char *max = buffer, *end = buffer + n - 8;
     int i = 0;
@@ -734,7 +766,6 @@ int chunkData(unsigned char *buffer, int n) {
  * This method compares the given pointers
  */
 int comp(unsigned char *i, unsigned char *max) {
-
     uint64_t a = __builtin_bswap64(*((uint64_t *) i));
     uint64_t b = __builtin_bswap64(*((uint64_t *) max));
 
@@ -742,4 +773,56 @@ int comp(unsigned char *i, unsigned char *max) {
         return 1;
     }
     return -1;
+}
+
+/**
+ * This method converts int to char
+ */
+unsigned char *serialize_int(unsigned char *buffer, u_int16_t value) {
+    buffer[0] = value >> 16;
+    buffer[1] = value >> 8;
+    buffer[2] = value;
+    return buffer + 3;
+}
+
+/**
+ * This method serializes char array
+ */
+unsigned char *serialize_char(unsigned char *buffer, char value) {
+    buffer[0] = value;
+    return buffer + 1;
+}
+
+/**
+ * This method serializes TransferData struct
+ */
+unsigned char *serialize_struct(unsigned char *msg,TransferData data) {
+    msg = serialize_int(msg, data.dataSize);
+    u_int16_t dedupSize = data.dedupSize;
+    msg = serialize_int(msg,dedupSize);
+    for (int i = 0; i < dedupSize; i++)
+        msg = serialize_int(msg, *(data.dedupPositions + i));
+
+    for (int i = 0; i < data.dataSize; i++)
+        msg = serialize_char(msg, *(data.dataLoad + i));
+
+    return msg;
+}
+
+/**
+ * This method de-serializes int
+ */
+int deserialize_int(unsigned char *buffer) {
+    int value = 0;
+    value |= buffer[1] << 16;
+    value |= buffer[2] << 8;
+    value |= buffer[3];
+    return value;
+}
+
+/**
+ * This method de-serializes chars
+ */
+char deserialize_char(unsigned char *buffer) {
+    return buffer[0];
 }
