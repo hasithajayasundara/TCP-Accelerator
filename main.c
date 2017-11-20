@@ -142,9 +142,11 @@ void *dedupThread(void);
 
 unsigned char *serialize_int(unsigned char *buffer, u_int16_t value);
 
+unsigned char *serialize_int32(unsigned char *buffer, u_int32_t value);
+
 unsigned char *serialize_char(unsigned char *buffer, char value);
 
-unsigned char *serialize_struct(unsigned char *msg,TransferData data);
+unsigned char *serialize_struct(unsigned char *msg, TransferData data, Array charArray, IntArray intArray);
 
 int deserialize_int(unsigned char *buffer);
 
@@ -218,7 +220,7 @@ void *readerThread(void) {
 
     //Server configuration
     /*Configuration for sending data to other accelerator node*/
-    char *ip = "10.8.145.196";
+    char *ip = "10.8.145.184";
     int sock = getSocket(ip);
 
     if (logfile == NULL) { printf("Unable to create log.txt file."); }
@@ -229,7 +231,7 @@ void *readerThread(void) {
         perror("Socket Error");
     }
 
-    for (k = 0; k < 1000; k++) {
+    for (k = 0; k < 2500; k++) {
         saddr_size = sizeof saddr;
         //Receive a packet
         data_size = recvfrom(sock_raw, buffer, 1460, 0, &saddr, (socklen_t *) &saddr_size);
@@ -274,7 +276,7 @@ void *readerThread(void) {
     Array dataArray;
     initArray(&dataArray, STORAGE_CONST);
 
-    for (int limit = 0; limit < orderQueue->size; limit++) {
+    for (int limit = 0; limit < 30; limit++) {
 
         u_int32_t sessID = orderQueue->orderRecordArray[orderQueue->front + limit]->sessionId;
         u_int16_t loc = orderQueue->orderRecordArray[orderQueue->front + limit]->location;
@@ -285,26 +287,21 @@ void *readerThread(void) {
         unsigned char *dataLoad = dQueue->dataRecordArray[loc]->tcpPayload;
         u_int16_t len = strlen(dataLoad);
 
-        int position = 3;
-        char lenArray[4] = {'0', '0', '0', '0'};
-        while (len != 0) {
-            lenArray[position--] = (char) (len % 10 + 48);
-            len = len / 10;
+        /*unsigned char *lenArray = (unsigned char *) malloc(3);
+        lenArray = serialize_int(lenArray, len);
+        lenArray-=3;
+
+        for (int i = 0; i < 3; i++) {
+            insertArray(&dataArray, *(lenArray + i));
         }
 
-        position = 3;
-        char idArray[4] = {'0', '0', '0', '0'};
-        while (id != 0) {
-            idArray[position--] = (char) (id % 10 + 48);
-            id = id / 10;
-        }
+        unsigned char *idArray = (unsigned char *) malloc(4);
+        idArray = serialize_int32(idArray, id);
+        idArray -= 4;
 
-        for (int k = 0; k < 4; k++) {
-            insertArray(&dataArray, idArray[k]);
-        }
-        for (int k = 0; k < 4; k++) {
-            insertArray(&dataArray, lenArray[k]);
-        }
+        for (int i = 0; i < 4; i++) {
+            insertArray(&dataArray, *(idArray + i));
+        }*/
 
         while (*dataLoad != '\0') {
             insertArray(&dataArray, *(dataLoad++));
@@ -315,7 +312,7 @@ void *readerThread(void) {
     SHA1_CTX ctx;
     BYTE buf[SHA1_BLOCK_SIZE];
     TransferData data;
-    int dataBoundaries = 0, transferDataLength = 0;
+    int dataBoundaries = 0;
     Array cArray;
     IntArray intArray;
     initArray(&cArray, STORAGE_CONST);
@@ -397,41 +394,58 @@ void *readerThread(void) {
         dataBoundaries += boundary + 1;
     }
 
-    //setting up struct values
-    data.dataSize = cArray.used;
-    data.dedupSize = intArray.used;
+    int finalDataLength = cArray.used;
+    int dedupLength = intArray.used;
 
-    if(cArray.used !=0) {
-        data.dataLoad = (char *) malloc(cArray.used);
-        for (int i = 0; i < cArray.used; i++) {
-            *(data.dataLoad + i) = *(cArray.array + i);
-        }
-    }else{
-        data.dataLoad = NULL;
-    }
-    if (intArray.used != 0) {
-        data.dedupPositions = (u_int16_t *) malloc(sizeof(u_int16_t) * intArray.used);
-        for (int i = 0; i < intArray.used; i++) {
-            *(data.dedupPositions + i) = *(intArray.array + i);
-        }
-    }else{
-        data.dedupPositions = NULL;
-    }
+    //setting up struct values
+    data.dataSize = finalDataLength;
+    data.dedupSize = dedupLength;
 
     //serialize the data structure
-    unsigned char *networkBuffer = (unsigned char *) malloc(cArray.used + (intArray.used + 1) * 4);
-    unsigned char *dupBuffer = networkBuffer;
+    unsigned char *networkBuffer = (unsigned char *) malloc(cArray.used + (intArray.used + 1) * 5);
 
-    //serialize the structure
-    serialize_struct(networkBuffer,data);
+    //setting up transfer buffer
+    int i = 4, count = 0;
+    while (count != 5) {
+
+        *(networkBuffer + i--) = (finalDataLength % 10) + 48;
+        finalDataLength /= 10;
+        count++;
+    }
+
+    i = 9, count = 0;
+    while (count != 5) {
+        *(networkBuffer + i--) = (dedupLength % 10) + 48;
+        dedupLength /= 10;
+        count++;
+    }
+
+    i = 14;
+    count = 0;
+    int dupI = 0;
+    for (int m = 0; m < intArray.used; m++) {
+        int initNum = *(intArray.array + m);
+        dupI = i;
+        while (count != 5) {
+            *(networkBuffer + i--) = (initNum % 10) + 48;
+            initNum /= 10;
+            count++;
+        }
+        i = dupI + 5;
+    }
+
+    i = 10 + intArray.used * 5;
+    while (*(cArray.array) != '\0') {
+        *(networkBuffer + i) = *(cArray.array);
+        cArray.array++;
+        i++;
+    }
 
     /*send data to other accelerator node*/
-    sendTo_ACNode(dupBuffer, sock);
-
-    int a = deserialize_int(dupBuffer);
+    sendTo_ACNode(networkBuffer, sock);
 
     //free data array
-    freeArray(&dataArray);
+    //freeArray(&dataArray);
 
     /*print data in different session data queues*/
     displayDataOnLogger(sessionBuf[0].queue, queueLogfile_1);
@@ -775,6 +789,18 @@ int comp(unsigned char *i, unsigned char *max) {
     return -1;
 }
 
+
+/**
+ * This method converts int to char
+ */
+unsigned char *serialize_int32(unsigned char *buffer, u_int32_t value) {
+    buffer[0] = value >> 24;
+    buffer[1] = value >> 16;
+    buffer[2] = value >> 8;
+    buffer[3] = value;
+    return buffer + 4;
+}
+
 /**
  * This method converts int to char
  */
@@ -796,15 +822,16 @@ unsigned char *serialize_char(unsigned char *buffer, char value) {
 /**
  * This method serializes TransferData struct
  */
-unsigned char *serialize_struct(unsigned char *msg,TransferData data) {
+unsigned char *serialize_struct(unsigned char *msg, TransferData data, Array charArray, IntArray intArray) {
     msg = serialize_int(msg, data.dataSize);
     u_int16_t dedupSize = data.dedupSize;
-    msg = serialize_int(msg,dedupSize);
+    msg = serialize_int(msg, dedupSize);
+
     for (int i = 0; i < dedupSize; i++)
-        msg = serialize_int(msg, *(data.dedupPositions + i));
+        msg = serialize_int(msg, *(intArray.array + i));
 
     for (int i = 0; i < data.dataSize; i++)
-        msg = serialize_char(msg, *(data.dataLoad + i));
+        msg = serialize_char(msg, *(charArray.array + i));
 
     return msg;
 }
@@ -814,9 +841,9 @@ unsigned char *serialize_struct(unsigned char *msg,TransferData data) {
  */
 int deserialize_int(unsigned char *buffer) {
     int value = 0;
-    value |= buffer[1] << 16;
-    value |= buffer[2] << 8;
-    value |= buffer[3];
+    value |= buffer[0] << 16;
+    value |= buffer[1] << 8;
+    value |= buffer[2];
     return value;
 }
 
