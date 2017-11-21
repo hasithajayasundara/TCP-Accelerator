@@ -1,6 +1,7 @@
 /*............................include custom header files....................................*/
 #ifndef headerIncluded
 
+#include <stdbool.h>
 #include "../DataDeduplication/headerFiles/headers.h"
 
 #endif
@@ -41,14 +42,14 @@
  * de-duplication variables
  */
 #define MAX_CHUNK_SIZE 65536
-#define AVERAGE_CHUNK_SIZE 4096
+#define AVERAGE_CHUNK_SIZE 2048
 #define E 2.718281828
 #define STORAGE_CONST 1
 
 /**
  * HashTable size
  */
-#define HASHSIZE 100
+#define HASHSIZE 100000
 
 /**
  * AE window size
@@ -218,7 +219,6 @@ void *readerThread(void) {
     testLogfile = fopen("testLogfile.txt", "w");
     testLogfile1 = fopen("testLogfile1.txt", "w");
 
-    //Server configuration
     /*Configuration for sending data to other accelerator node*/
     char *ip = "10.8.145.184";
     int sock = getSocket(ip);
@@ -227,11 +227,13 @@ void *readerThread(void) {
 
     int sock_raw = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (sock_raw < 0) {
-        //Print the error with proper message
         perror("Socket Error");
     }
 
-    for (k = 0; k < 2500; k++) {
+    int queueTracer = 0;
+
+    while(1) {
+
         saddr_size = sizeof saddr;
         //Receive a packet
         data_size = recvfrom(sock_raw, buffer, 1460, 0, &saddr, (socklen_t *) &saddr_size);
@@ -271,9 +273,176 @@ void *readerThread(void) {
             printf("Packet is TCP\n");
         }
 
+        if (((orderQueue->size) - queueTracer) == 30) {
+
+            Array dataArray;
+            initArray(&dataArray, STORAGE_CONST);
+
+            for (int limit = 0; limit < 30; limit++) {
+
+                u_int32_t sessID = orderQueue->orderRecordArray[queueTracer + limit]->sessionId;
+                u_int16_t loc = orderQueue->orderRecordArray[queueTracer + limit]->location;
+
+                DATA_QUEUE *dQueue = sessionBuf[sessID].queue;
+
+                u_int32_t id = dQueue->dataRecordArray[loc]->sessionId;
+                unsigned char *dataLoad = dQueue->dataRecordArray[loc]->tcpPayload;
+                u_int16_t len = strlen(dataLoad);
+
+                while (*dataLoad != '\0') {
+                    insertArray(&dataArray, *(dataLoad++));
+                }
+            }
+
+            //Initialize SHA contexts
+            SHA1_CTX ctx;
+            BYTE buf[SHA1_BLOCK_SIZE];
+            TransferData data;
+            int dataBoundaries = 0;
+            Array cArray;
+            IntArray intArray;
+            initArray(&cArray, STORAGE_CONST);
+            initArray(&intArray, STORAGE_CONST);
+
+            unsigned char * dupArray = dataArray.array;
+
+            while (1) {
+
+                int length = strlen(dupArray);
+
+                //if data length is not enough
+                if (length < (windowSize + 8)) {
+                    //calculate hash
+                    sha1Init(&ctx);
+                    sha1Update(&ctx, dupArray, length);
+                    sha1Final(&ctx, buf);
+
+                    //check whether the hash exist
+                    if (lookup(buf) == NULL) {
+                        (void) insertData(buf, dupArray);
+                        int dataArrayCount = 0;
+                        while (*(dupArray + dataArrayCount) != '\0') {
+                            insertArray(&cArray, *(dupArray + dataArrayCount));
+                            dataArrayCount++;
+                        }
+                    } else {
+                        int j = 0;
+                        insertIntArray(&intArray, 0);
+                        while (j != 20) {
+                            if (buf[j] != '\0') {
+                                insertArray(&cArray, buf[j]);
+                            } else {
+                                insertArray(&cArray, '*');
+                            }
+                            j++;
+                        }
+                    }
+                    break;
+                }
+
+                //if length is more than window size
+                int boundary = chunkData(dupArray, length);
+
+                //calculate hash
+                sha1Init(&ctx);
+                sha1Update(&ctx, dupArray, boundary + 1);
+                sha1Final(&ctx, buf);
+
+                //store hash values
+                char subsStr[boundary + 1];
+                for (int j = 0; j < boundary + 1; j++) {
+                    subsStr[j] = dupArray[j];
+                }
+
+                //check whether the hash exist
+                if (lookup(buf) == NULL) {
+                    (void) insertData(buf, subsStr);
+                    for (int k = 0; k < boundary + 1; k++) {
+                        insertArray(&cArray, subsStr[k]);
+                    }
+                } else {
+                    int j = 0;
+                    insertIntArray(&intArray, dataBoundaries);
+                    while (j != 20) {
+                        if (buf[j] != '\0') {
+                            insertArray(&cArray, buf[j]);
+                        } else {
+                            insertArray(&cArray, '*');
+                        }
+                        j++;
+                    }
+                }
+
+                //break condition
+                if (boundary == length) {
+                    break;
+                }
+
+                //increment string pointer
+                dupArray = dupArray + boundary + 1;
+                dataBoundaries += boundary + 1;
+            }
+
+            int finalDataLength = cArray.used;
+            int dedupLength = intArray.used;
+
+            //setting up struct values
+            data.dataSize = finalDataLength;
+            data.dedupSize = dedupLength;
+
+            //serialize the data structure
+            unsigned char *networkBuffer = (unsigned char *) malloc(cArray.used + (intArray.used + 1) * 5);
+
+            //setting up transfer buffer
+            int i = 4, count = 0;
+            while (count != 5) {
+
+                *(networkBuffer + i--) = (finalDataLength % 10) + 48;
+                finalDataLength /= 10;
+                count++;
+            }
+
+            i = 9, count = 0;
+            while (count != 5) {
+                *(networkBuffer + i--) = (dedupLength % 10) + 48;
+                dedupLength /= 10;
+                count++;
+            }
+
+            i = 14;
+            count = 0;
+            int dupI = 0;
+            for (int m = 0; m < intArray.used; m++) {
+                int initNum = *(intArray.array + m);
+                dupI = i;
+                while (count != 5) {
+                    *(networkBuffer + i--) = (initNum % 10) + 48;
+                    initNum /= 10;
+                    count++;
+                }
+                i = dupI + 5;
+            }
+
+            i = 10 + intArray.used * 5;
+            int arrayCount = 0;
+            while (*(cArray.array + arrayCount) != '\0') {
+                *(networkBuffer + i) = *(cArray.array + arrayCount);
+                i++;
+                arrayCount++;
+            }
+
+            /*send data to other accelerator node*/
+            sendTo_ACNode(networkBuffer, sock);
+
+            //free arrays
+            freeArray(&intArray);
+            freeArray(&cArray);
+            freeArray(&dataArray);
+            queueTracer += 30;
+        }
     }
 
-    Array dataArray;
+    /*Array dataArray;
     initArray(&dataArray, STORAGE_CONST);
 
     for (int limit = 0; limit < 30; limit++) {
@@ -287,7 +456,8 @@ void *readerThread(void) {
         unsigned char *dataLoad = dQueue->dataRecordArray[loc]->tcpPayload;
         u_int16_t len = strlen(dataLoad);
 
-        /*unsigned char *lenArray = (unsigned char *) malloc(3);
+
+        *//*unsigned char *lenArray = (unsigned char *) malloc(3);
         lenArray = serialize_int(lenArray, len);
         lenArray-=3;
 
@@ -301,7 +471,7 @@ void *readerThread(void) {
 
         for (int i = 0; i < 4; i++) {
             insertArray(&dataArray, *(idArray + i));
-        }*/
+        }*//*
 
         while (*dataLoad != '\0') {
             insertArray(&dataArray, *(dataLoad++));
@@ -441,18 +611,18 @@ void *readerThread(void) {
         i++;
     }
 
-    /*send data to other accelerator node*/
-    sendTo_ACNode(networkBuffer, sock);
+    *//*send data to other accelerator node*//*
+    sendTo_ACNode(networkBuffer, sock);*/
 
-    //free data array
+    /*//free data array
     //freeArray(&dataArray);
 
-    /*print data in different session data queues*/
+    *//*print data in different session data queues*//*
     displayDataOnLogger(sessionBuf[0].queue, queueLogfile_1);
     displayDataOnLogger(sessionBuf[1].queue, queueLogfile_2);
     displayOrderOnLogger(orderQueue, orderQueueLogfile);
 
-    /*access and print data using order queue*/
+    *//*access and print data using order queue*//*
     PrintData(sessionBuf[orderQueue->orderRecordArray[orderQueue->front +
                                                       5]->sessionId].queue->dataRecordArray[orderQueue->orderRecordArray[
                       orderQueue->front + 5]->location]->tcpPayload,
@@ -467,7 +637,7 @@ void *readerThread(void) {
                                                       6]->sessionId].queue->dataRecordArray[orderQueue->orderRecordArray[
                       orderQueue->front + 6]->location]->size, testLogfile);
 
-    printf("Finished");
+    printf("Finished");*/
     pthread_exit(0);
 
 }
@@ -634,6 +804,7 @@ void insertArray(Array *a, char element) {
  * release array
  */
 void freeArray(Array *a) {
+
     free(a->array);
     a->array = NULL;
     a->used = a->size = 0;
@@ -657,15 +828,6 @@ void insertIntArray(IntArray *a, u_int16_t element) {
         a->array = (u_int16_t *) realloc(a->array, a->size);
     }
     a->array[a->used++] = element;
-}
-
-/*
- * release array
- */
-void freeIntArray(IntArray *a) {
-    free(a->array);
-    a->array = NULL;
-    a->used = a->size = 0;
 }
 
 /*
