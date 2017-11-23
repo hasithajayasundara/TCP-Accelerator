@@ -804,7 +804,6 @@ void insertArray(Array *a, char element) {
  * release array
  */
 void freeArray(Array *a) {
-
     free(a->array);
     a->array = NULL;
     a->used = a->size = 0;
